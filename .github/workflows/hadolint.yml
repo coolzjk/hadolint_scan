@@ -1,0 +1,37 @@
+name: Hadolint Security Scan
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # allow handle triggering
+
+jobs:
+  hadolint:
+    name: Run Hadolint Dockerfile Linter
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run Hadolint
+      uses: hadolint/hadolint-action@v3.1.0
+      with:
+        dockerfile: Dockerfile
+        format: sari
+        output-file: hadolint-results.sarif
+        no-fail: false
+        
+    - name: Upload SARIF results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: hadolint-results.sarif
+        
+    - name: Display results in console
+      run: |
+        echo "=== Hadolint Scan Results ==="
+        docker run --rm -i hadolint/hadolint < Dockerfile || true
+        echo "============================="
