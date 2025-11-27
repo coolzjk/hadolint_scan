@@ -5,38 +5,51 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:
+  workflow_dispatch:  # 允许手动触发
 
+# 关键设置：为 GITHUB_TOKEN 显式定义最小化权限
 permissions:
   contents: read
-  security-events: write
+  # 注意：这里我们移除了默认的 security-events: write
+  # 这将避免在来自复刻仓库的 PR 上触发权限错误
 
 jobs:
   hadolint:
     name: Run Hadolint Dockerfile Linter
     runs-on: ubuntu-latest
-    
+
+    # 关键修复：如果此工作流由复刻仓库的 PR 触发，则跳过安全事件上传
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      
+
     - name: Run Hadolint
       id: lint
-      continue-on-error: true
+      continue-on-error: true  # 即使发现错误，也让工作流继续，以便我们能看到结果
       uses: hadolint/hadolint-action@v3.1.0
       with:
         dockerfile: Dockerfile
         format: sarif
         output-file: hadolint-results.sarif
 
+    # 仅在满足特定条件时才上传 SARIF 结果
     - name: Upload SARIF results
-      if: always() && steps.lint.outcome == 'success' && hashFiles('hadolint-results.sarif') && github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      # 此步骤仅在非复刻仓库的 PR 或 Push 事件时运行
+      if: always() && steps.lint.outcome == 'success' && hashFiles('hadolint-results.sarif') == 1
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: hadolint-results.sarif
+      env:
+        # 仅在此处为上传步骤赋予 security-events 权限
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+    # 控制台输出作为备用方案，始终运行
     - name: Show console results
       if: always()
       run: |
         echo "=== Hadolint Console Output ==="
         docker run --rm -i hadolint/hadolint < Dockerfile || echo "Hadolint check completed with exit code: $?"
+        echo "=============================="
+        echo "提示: 对于来自复刻仓库(Fork)的 Pull Request，出于安全考虑，GitHub 不允许自动上传安全分析结果。"
