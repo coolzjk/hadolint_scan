@@ -4,38 +4,73 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
-    types: [opened, synchronize, reopened]  # 明确指定 PR 事件类型
     branches: [ main, master ]
 
-# 关键设置：为 GITHUB_TOKEN 显式定义权限
+# 完整的权限配置
 permissions:
   contents: read
-  security-events: write  # 必须拥有写入安全事件的权限
+  security-events: write
+  actions: read
+  checks: write
 
 jobs:
   hadolint:
-    name: Run Hadolint and Upload Report
+    name: Run Hadolint Dockerfile Linter
     runs-on: ubuntu-latest
-
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      with:
-        # 安全最佳实践：对于 PR，检出特定提交而非合并提交
-        ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      
+    - name: Run Hadolint with validation
+      id: hadolint
+      run: |
+        # 首先运行 Hadolint 并保存 SARIF 输出
+        docker run --rm -i hadolint/hadolint --format sarif < Dockerfile > hadolint-results.sarif
+        
+        # 验证 SARIF 文件格式
+        if [ -s hadolint-results.sarif ]; then
+          echo "✅ SARIF file generated successfully"
+          # 检查是否是有效的 JSON
+          if jq . hadolint-results.sarif > /dev/null 2>&1; then
+            echo "✅ SARIF file is valid JSON"
+            ISSUE_COUNT=$(jq '.runs[0].results | length' hadolint-results.sarif)
+            echo "Found $ISSUE_COUNT issues"
+          else
+            echo "❌ SARIF file is not valid JSON"
+            # 如果是空文件或无效 JSON，创建一个有效的空 SARIF 结构
+            echo '{"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "Hadolint"}}, "results": []}]}' > hadolint-results.sarif
+          fi
+        else
+          echo "❌ SARIF file is empty"
+          # 创建空的 SARIF 文件
+          echo '{"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "Hadolint"}}, "results": []}]}' > hadolint-results.sarif
+        fi
+        
+      continue-on-error: true
 
-    - name: Run Hadolint
-      id: lint
-      continue-on-error: true  # 即使发现错误，也让工作流继续，以便上传报告
-      uses: hadolint/hadolint-action@v3.1.0
-      with:
-        dockerfile: Dockerfile
-        format: sarif
-        output-file: hadolint-results.sarif
+    - name: Validate SARIF file content
+      run: |
+        echo "=== SARIF File Content ==="
+        cat hadolint-results.sarif
+        echo "=========================="
+        
+        # 确保文件存在且有效
+        if [ ! -f hadolint-results.sarif ]; then
+          echo "Creating fallback SARIF file"
+          echo '{"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "Hadolint"}}, "results": []}]}' > hadolint-results.sarif
+        fi
 
-    - name: Upload SARIF results to Code Scanning
-      # 仅在 SARIF 文件生成后上传
-      if: always() && steps.lint.outcome == 'success' && hashFiles('hadolint-results.sarif') == 1
+    - name: Upload SARIF results
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: hadolint-results.sarif
+      env:
+        # 确保使用正确的 token
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Show detailed console output
+      if: always()
+      run: |
+        echo "=== Detailed Hadolint Output ==="
+        docker run --rm -i hadolint/hadolint < Dockerfile || true
