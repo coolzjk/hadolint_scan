@@ -29,9 +29,3 @@ jobs:
       if: always()
       with:
         sarif_file: hadolint-results.sarif
-        
-    - name: Display results in console
-      run: |
-        echo "=== Hadolint Scan Results ==="
-        docker run --rm -i hadolint/hadolint < Dockerfile || true
-        echo "============================="
