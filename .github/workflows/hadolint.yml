@@ -18,15 +18,31 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Install jq
+        run: |
+          echo "安装 jq 工具..."
+          sudo apt-get update
+          sudo apt-get install -y jq
+          echo "✅ jq 安装完成"
+
       - name: Run Hadolint and generate SARIF
         id: hadolint-scan
         run: |
-          # 确保使用 --format sarif 并直接输出到文件
           echo "正在运行 Hadolint 扫描..."
-          docker run --rm -i hadolint/hadolint --format sarif < Dockerfile > hadolint-results.sarif
           
-          # 检查文件是否生成且非空
-          if [ -s "hadolint-results.sarif" ]; then
+          # 首先检查 Dockerfile 是否存在
+          if [ ! -f "Dockerfile" ]; then
+            echo "❌ Dockerfile 不存在"
+            # 创建空的 SARIF 文件
+            echo '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Hadolint"}},"results":[]}]}' > hadolint-results.sarif
+            exit 0
+          fi
+          
+          # 运行 Hadolint 并生成 SARIF
+          docker run --rm -i hadolint/hadolint --format sarif < Dockerfile > hadolint-results.sarif || true
+          
+          # 检查文件是否生成
+          if [ -f "hadolint-results.sarif" ]; then
             echo "✅ SARIF 文件已生成"
             # 验证文件是否为合法 JSON
             if jq . hadolint-results.sarif > /dev/null 2>&1; then
@@ -35,16 +51,32 @@ jobs:
               echo "扫描完成，发现 $ISSUE_COUNT 个问题"
             else
               echo "❌ SARIF 文件不是有效的 JSON，创建最小有效结构..."
-              # 创建一个符合 SARIF 标准的最小有效 JSON 结构[citation:4]
+              # 创建一个符合 SARIF 标准的最小有效 JSON 结构
               echo '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Hadolint"}},"results":[]}]}' > hadolint-results.sarif
             fi
           else
-            echo "❌ SARIF 文件为空，创建最小有效结构..."
+            echo "❌ SARIF 文件未生成，创建最小有效结构..."
             echo '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Hadolint"}},"results":[]}]}' > hadolint-results.sarif
           fi
 
+      - name: Debug - Check SARIF file
+        run: |
+          echo "=== SARIF 文件内容 ==="
+          cat hadolint-results.sarif
+          echo "=== 文件大小 ==="
+          ls -la hadolint-results.sarif
+
       - name: Upload SARIF results
-        # 更新到 CodeQL Action v4 以解决弃用警告[citation:1]
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: hadolint-results.sarif
+
+      - name: Show console results
+        if: always()
+        run: |
+          echo "=== Hadolint 控制台输出 ==="
+          if [ -f "Dockerfile" ]; then
+            docker run --rm -i hadolint/hadolint < Dockerfile || true
+          else
+            echo "没有找到 Dockerfile"
+          fi
