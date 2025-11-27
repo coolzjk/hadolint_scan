@@ -18,113 +18,163 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run Hadolint and generate SARIF (Robust Method)
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Run Hadolint and generate SARIF
         id: run-hadolint
         run: |
           echo "开始运行 Hadolint 扫描..."
           
-          # 方法一：使用卷挂载方式运行 Hadolint，避免输入输出重定向问题
-          docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint:latest hadolint --format sarif Dockerfile > hadolint-results.sarif 2>&1 || true
+          # 方法一：直接使用标准输入输出，避免权限问题
+          docker run --rm -i hadolint/hadolint:latest --format sarif < Dockerfile > hadolint-raw.sarif 2>/dev/null || true
           
-          # 检查 SARIF 文件是否生成且非空
-          if [ -s "hadolint-results.sarif" ]; then
-            echo "✅ SARIF 文件已生成且非空"
-            # 检查文件内容是否包含有效的 JSON
-            if jq . hadolint-results.sarif > /dev/null 2>&1; then
-              echo "✅ SARIF 文件包含有效的 JSON 结构"
-              # 检查是否包含实际的扫描结果
-              if jq -e '.runs[0].results | length > 0' hadolint-results.sarif > /dev/null 2>&1; then
-                echo "🎉 发现 $(jq '.runs[0].results | length' hadolint-results.sarif) 个问题"
-              else
-                echo "ℹ️ SARIF 文件有效，但未发现任何问题"
-              fi
+          # 检查原始文件
+          if [ -s "hadolint-raw.sarif" ]; then
+            echo "✅ 原始 SARIF 文件已生成"
+            if jq . hadolint-raw.sarif > /dev/null 2>&1; then
+              echo "✅ 原始 SARIF 文件是有效的 JSON"
+              cp hadolint-raw.sarif hadolint-results.sarif
+              ISSUE_COUNT=$(jq -r '.runs[0].results | length' hadolint-raw.sarif)
+              echo "🎉 发现 $ISSUE_COUNT 个问题，直接使用原始文件"
+              echo "use_raw=true" >> $GITHUB_OUTPUT
             else
-              echo "❌ SARIF 文件不是有效的 JSON，尝试修复..."
-              # 检查文件内容，看是否有错误信息
-              cat hadolint-results.sarif
-              # 标记为需要修复
-              echo "needs_fix=true" >> $GITHUB_OUTPUT
+              echo "❌ 原始 SARIF 文件不是有效的 JSON"
+              echo "use_raw=false" >> $GITHUB_OUTPUT
             fi
           else
-            echo "❌ SARIF 文件未生成或为空"
-            echo "needs_fix=true" >> $GITHUB_OUTPUT
+            echo "❌ 原始 SARIF 文件未生成或为空"
+            echo "use_raw=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Create valid SARIF structure if needed
+      - name: Create enhanced SARIF if needed
         id: create-sarif
-        if: steps.run-hadolint.outputs.needs_fix == 'true'
+        if: steps.run-hadolint.outputs.use_raw != 'true'
         run: |
-          echo "创建符合标准的 SARIF 结构..."
-          # 安装 jq
-          sudo apt-get update && sudo apt-get install -y jq
+          echo "创建增强版 SARIF 文件..."
           
-          # 运行 Hadolint 获取普通输出，用于生成有意义的结果
-          echo "重新运行 Hadolint 获取问题列表..."
-          DOCKER_OUTPUT=$(docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint:latest hadolint Dockerfile || true)
+          # 获取所有问题的控制台输出
+          echo "获取详细问题列表..."
+          DOCKER_OUTPUT=$(docker run --rm -i hadolint/hadolint:latest < Dockerfile 2>/dev/null || true)
           
-          # 构建一个包含实际问题的 SARIF 结构
-          jq -n --arg output "$DOCKER_OUTPUT" '
-          {
-            "version": "2.1.0",
-            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-            "runs": [
-              {
-                "tool": {
-                  "driver": {
-                    "name": "Hadolint",
-                    "informationUri": "https://github.com/hadolint/hadolint",
-                    "rules": [
-                      {
-                        "id": "DL3006",
-                        "shortDescription": {"text": "Always tag the version of an image explicitly"},
-                        "helpUri": "https://github.com/hadolint/hadolint/wiki/DL3006"
-                      }
-                    ]
-                  }
-                },
-                "results": [
-                  {
-                    "ruleId": "DL3006",
-                    "level": "warning",
-                    "message": {
-                      "text": "Always tag the version of an image explicitly. Found: 'ubuntu'"
-                    },
-                    "locations": [
-                      {
-                        "physicalLocation": {
-                          "artifactLocation": {
-                            "uri": "Dockerfile"
-                          },
-                          "region": {
-                            "startLine": 1
-                          }
+          # 解析控制台输出，构建完整的问题列表
+          RULES=()
+          RESULTS=()
+          
+          # 解析每一行输出，提取规则ID和问题信息
+          while IFS= read -r line; do
+            if [[ $line =~ DL[0-9]+\|(error|warning|info|style)\|(DL[0-9]+):(.+) ]]; then
+              LEVEL="${BASH_REMATCH[1]}"
+              RULE_ID="${BASH_REMATCH[2]}"
+              MESSAGE="${BASH_REMATCH[3]}"
+              
+              # 添加规则到规则列表（去重）
+              if [[ ! " ${RULES[@]} " =~ " ${RULE_ID} " ]]; then
+                RULES+=("$RULE_ID")
+              fi
+              
+              # 简单的行号推断（基于问题顺序）
+              LINE_NUMBER=$(( ${#RESULTS[@]} + 1 ))
+              
+              # 构建结果对象
+              RESULTS+=("
+                {
+                  \"ruleId\": \"$RULE_ID\",
+                  \"level\": \"$LEVEL\",
+                  \"message\": {
+                    \"text\": \"$MESSAGE\"
+                  },
+                  \"locations\": [
+                    {
+                      \"physicalLocation\": {
+                        \"artifactLocation\": {
+                          \"uri\": \"Dockerfile\"
+                        },
+                        \"region\": {
+                          \"startLine\": $LINE_NUMBER
                         }
                       }
-                    ]
-                  }
-                ]
-              }
-            ]
-          }' > hadolint-results.sarif
+                    }
+                  ]
+                }
+              ")
+            fi
+          done <<< "$DOCKER_OUTPUT"
           
-          echo "✅ 已创建包含示例问题的有效 SARIF 文件"
+          # 构建规则数组JSON
+          RULES_JSON=""
+          for rule in "${RULES[@]}"; do
+            if [ -n "$RULES_JSON" ]; then
+              RULES_JSON+=","
+            fi
+            RULES_JSON+="
+            {
+              \"id\": \"$rule\",
+              \"shortDescription\": {
+                \"text\": \"$rule rule\"
+              },
+              \"helpUri\": \"https://github.com/hadolint/hadolint/wiki/$rule\"
+            }"
+          done
+          
+          # 构建结果数组JSON
+          RESULTS_JSON=""
+          for result in "${RESULTS[@]}"; do
+            if [ -n "$RESULTS_JSON" ]; then
+              RESULTS_JSON+=","
+            fi
+            RESULTS_JSON+="$result"
+          done
+          
+          # 创建完整的SARIF结构
+          jq -n \
+            --argjson rules "[$RULES_JSON]" \
+            --argjson results "[$RESULTS_JSON]" \
+            '{
+              "version": "2.1.0",
+              "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+              "runs": [
+                {
+                  "tool": {
+                    "driver": {
+                      "name": "Hadolint",
+                      "informationUri": "https://github.com/hadolint/hadolint",
+                      "rules": $rules
+                    }
+                  },
+                  "results": $results
+                }
+              ]
+            }' > hadolint-results.sarif
+          
+          FINAL_COUNT=$(jq -r '.runs[0].results | length' hadolint-results.sarif)
+          echo "✅ 增强版 SARIF 文件已创建，包含 $FINAL_COUNT 个问题"
 
-      - name: Validate and finalize SARIF file
+      - name: Use raw SARIF if available
+        if: steps.run-hadolint.outputs.use_raw == 'true'
         run: |
-          echo "验证最终 SARIF 文件..."
-          # 确保文件使用 UTF-8 编码 [citation:8]
-          iconv -f utf-8 -t utf-8 hadolint-results.sarif > hadolint-results-utf8.sarif 2>/dev/null || cp hadolint-results.sarif hadolint-results-utf8.sarif
-          mv hadolint-results-utf8.sarif hadolint-results.sarif
-          
-          # 最终验证
+          echo "使用原始 SARIF 文件"
+          cp hadolint-raw.sarif hadolint-results.sarif
+
+      - name: Validate final SARIF file
+        run: |
+          echo "=== 最终 SARIF 文件验证 ==="
           if jq . hadolint-results.sarif > /dev/null 2>&1; then
-            echo "🎉 最终 SARIF 文件验证通过"
+            echo "✅ 最终 SARIF 文件验证通过"
             echo "文件内容概要:"
             echo "  - 版本: $(jq -r '.version' hadolint-results.sarif)"
-            echo "  - 问题数量: $(jq -r '.runs[0].results | length' hadolint-results.sarif)"
+            echo "  - 工具: $(jq -r '.runs[0].tool.driver.name' hadolint-results.sarif)"
+            echo "  - 规则数量: $(jq -r '.runs[0].tool.driver.rules | length' hadolint-results.sarif)"
+            echo "  - 问题总数: $(jq -r '.runs[0].results | length' hadolint-results.sarif)"
+            
+            # 显示具体问题统计
+            echo "问题级别统计:"
+            jq -r '.runs[0].results[].level' hadolint-results.sarif | sort | uniq -c | while read count level; do
+              echo "  - $level: $count 个"
+            done || true
           else
-            echo "❌ 最终 SARIF 文件验证失败，创建最小结构..."
-            jq -n '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Hadolint"}},"results":[]}]}' > hadolint-results.sarif
+            echo "❌ 最终 SARIF 文件验证失败"
+            exit 1
           fi
 
       - name: Upload SARIF results
@@ -136,4 +186,5 @@ jobs:
         if: always()
         run: |
           echo "=== Hadolint 命令行检查结果 ==="
-          docker run --rm -v "$PWD:/repo" -w /repo hadolint/hadolint:latest hadolint Dockerfile || true
+          docker run --rm -i hadolint/hadolint:latest < Dockerfile || true
+          echo "=============================="
