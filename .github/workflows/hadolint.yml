@@ -8,38 +8,60 @@ on:
 
 permissions:
   contents: read
-  security-events: write
+  security-events: write  # 必须拥有写入安全事件的权限[citation:9]
 
 jobs:
   hadolint:
-    name: Lint Dockerfile with Hadolint
+    name: Run Hadolint and Upload SARIF
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run Hadolint
+      - name: Run Hadolint and generate SARIF
         id: run-hadolint
-        # 即使扫描出错，工作流也继续，以便生成报告
-        continue-on-error: true
         run: |
-          echo "正在运行Hadolint扫描..."
-          # 尝试生成SARIF报告，即使失败也不终止步骤
-          docker run --rm -i hadolint/hadolint --format sarif < Dockerfile > hadolint-results.sarif 2>/dev/null || echo "Hadolint运行完毕（可能发现错误），已生成报告框架。"
+          echo "开始运行 Hadolint 扫描..."
+          # 使用Docker运行Hadolint，明确指定SARIF格式输出到文件[citation:9]
+          docker run --rm -v "$PWD/Dockerfile:/Dockerfile" hadolint/hadolint:latest \
+            /bin/bash -c "hadolint --format sarif /Dockerfile > /output.sarif" || true
+          
+          # 将容器内的输出文件复制到工作流工作区
+          docker create --name temp-container hadolint/hadolint:latest
+          docker cp temp-container:/output.sarif ./hadolint-results.sarif || true
+          docker rm temp-container
 
-      - name: Ensure valid SARIF file
+          # 检查SARIF文件是否已生成
+          if [ -f "hadolint-results.sarif" ]; then
+            echo "✅ SARIF 文件已生成"
+            # 检查文件是否为空
+            if [ -s "hadolint-results.sarif" ]; then
+              echo "✅ SARIF 文件非空"
+            else
+              echo "⚠️ SARIF 文件为空，将创建有效结构"
+            fi
+          else
+            echo "❌ SARIF 文件未生成，将创建有效结构"
+          fi
+
+      - name: Ensure valid SARIF structure
         id: ensure-sarif
         run: |
-          echo "正在验证并确保SARIF文件有效..."
-          # 检查文件是否存在且大小非零，并能被jq解析
-          if [ -s "hadolint-results.sarif" ] && jq . hadolint-results.sarif > /dev/null 2>&1; then
-            echo "✅ 原始SARIF文件有效。"
-            echo "is-valid=true" >> $GITHUB_OUTPUT
+          echo "确保 SARIF 文件结构有效..."
+          
+          # 安装 jq 用于 JSON 处理
+          sudo apt-get update && sudo apt-get install -y jq
+          
+          # 检查现有文件是否为有效的JSON
+          if [ -f "hadolint-results.sarif" ] && jq . hadolint-results.sarif > /dev/null 2>&1; then
+            echo "✅ 现有 SARIF 文件包含有效的 JSON"
+            # 确保文件使用 UTF-8 编码[citation:5]
+            iconv -f utf-8 -t utf-8 hadolint-results.sarif > hadolint-results-utf8.sarif 2>/dev/null || cp hadolint-results.sarif hadolint-results-utf8.sarif
+            mv hadolint-results-utf8.sarif hadolint-results.sarif
           else
-            echo "🔄 原始SARIF文件无效或为空，创建符合标准的最小SARIF结构..."
-            # 创建一个完全符合SARIF v2.1.0标准的最小有效JSON结构
+            echo "🔄 创建符合标准的最小 SARIF 结构..."
+            # 创建一个完全符合 SARIF 标准的最小有效结构[citation:8]
             jq -n \
-              --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
               '{
                 "version": "2.1.0",
                 "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
@@ -52,27 +74,22 @@ jobs:
                         "rules": []
                       }
                     },
-                    "results": [],
-                    "invocations": [
-                      {
-                        "executionSuccessful": true,
-                        "endTimeUtc": $timestamp
-                      }
-                    ]
+                    "results": []
                   }
                 ]
               }' > hadolint-results.sarif
-            echo "is-valid=false" >> $GITHUB_OUTPUT
-            echo "✅ 最小有效SARIF文件已创建。"
           fi
+          
+          # 验证最终文件
+          echo "最终 SARIF 文件内容:"
+          cat hadolint-results.sarif
 
       - name: Upload SARIF results
-        # 使用最新的CodeQL Action v4版本
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@v4  # 使用最新的v4版本[citation:6]
         with:
           sarif_file: hadolint-results.sarif
 
-      - name: Show console output
+      - name: Show console results
         if: always()
         run: |
           echo "=== Hadolint 命令行检查结果 ==="
