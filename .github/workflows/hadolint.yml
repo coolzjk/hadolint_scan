@@ -4,52 +4,38 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
+    types: [opened, synchronize, reopened]  # 明确指定 PR 事件类型
     branches: [ main, master ]
-  workflow_dispatch:  # 允许手动触发
 
-# 关键设置：为 GITHUB_TOKEN 显式定义最小化权限
+# 关键设置：为 GITHUB_TOKEN 显式定义权限
 permissions:
   contents: read
-  # 注意：这里我们移除了默认的 security-events: write
-  # 这将避免在来自复刻仓库的 PR 上触发权限错误
+  security-events: write  # 必须拥有写入安全事件的权限
 
 jobs:
   hadolint:
-    name: Run Hadolint Dockerfile Linter
+    name: Run Hadolint and Upload Report
     runs-on: ubuntu-latest
-
-    # 关键修复：如果此工作流由复刻仓库的 PR 触发，则跳过安全事件上传
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        # 安全最佳实践：对于 PR，检出特定提交而非合并提交
+        ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
     - name: Run Hadolint
       id: lint
-      continue-on-error: true  # 即使发现错误，也让工作流继续，以便我们能看到结果
+      continue-on-error: true  # 即使发现错误，也让工作流继续，以便上传报告
       uses: hadolint/hadolint-action@v3.1.0
       with:
         dockerfile: Dockerfile
         format: sarif
         output-file: hadolint-results.sarif
 
-    # 仅在满足特定条件时才上传 SARIF 结果
-    - name: Upload SARIF results
-      # 此步骤仅在非复刻仓库的 PR 或 Push 事件时运行
+    - name: Upload SARIF results to Code Scanning
+      # 仅在 SARIF 文件生成后上传
       if: always() && steps.lint.outcome == 'success' && hashFiles('hadolint-results.sarif') == 1
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: hadolint-results.sarif
-      env:
-        # 仅在此处为上传步骤赋予 security-events 权限
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    # 控制台输出作为备用方案，始终运行
-    - name: Show console results
-      if: always()
-      run: |
-        echo "=== Hadolint Console Output ==="
-        docker run --rm -i hadolint/hadolint < Dockerfile || echo "Hadolint check completed with exit code: $?"
-        echo "=============================="
-        echo "提示: 对于来自复刻仓库(Fork)的 Pull Request，出于安全考虑，GitHub 不允许自动上传安全分析结果。"
