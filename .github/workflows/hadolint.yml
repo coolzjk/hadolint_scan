@@ -22,29 +22,22 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Run Hadolint with validation
+    - name: Run Hadolint with SARIF output
       id: hadolint
-      run: |
-        # 首先运行 Hadolint 并保存 SARIF 输出
-        docker run --rm -i hadolint/hadolint --format sarif < Dockerfile > hadolint-results.sarif
+      uses: hadolint/hadolint-action@v3.1.0
+      with:
+        dockerfile: Dockerfile
+        format: sarif
+        output-file: hadolint-results.sarif
+        no-fail: false
         
-        # 验证 SARIF 文件格式
-        if [ -s hadolint-results.sarif ]; then
-          echo "✅ SARIF file generated successfully"
-          # 检查是否是有效的 JSON
-          if jq . hadolint-results.sarif > /dev/null 2>&1; then
-            echo "✅ SARIF file is valid JSON"
-            ISSUE_COUNT=$(jq '.runs[0].results | length' hadolint-results.sarif)
-            echo "Found $ISSUE_COUNT issues"
-          else
-            echo "❌ SARIF file is not valid JSON"
-            # 如果是空文件或无效 JSON，创建一个有效的空 SARIF 结构
-            echo '{"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "Hadolint"}}, "results": []}]}' > hadolint-results.sarif
-          fi
+    - name: Validate SARIF file
+      run: |
+        if [ -f hadolint-results.sarif ]; then
+          echo "Validating SARIF file..."
+          jq . hadolint-results.sarif > /dev/null && echo "✅ SARIF file is valid JSON"
         else
-          echo "❌ SARIF file is empty"
-          # 创建空的 SARIF 文件
-          echo '{"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "Hadolint"}}, "results": []}]}' > hadolint-results.sarif
+          echo "❌ SARIF file not found"
         fi
         
       continue-on-error: true
